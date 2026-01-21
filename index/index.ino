@@ -426,23 +426,66 @@ void handleRoot() {
   html += "<p>IP: " + WiFi.softAPIP().toString() + "</p>";
 
   html += "<h3>模式設定</h3>";
-  html += "<a class='btn' href='/mode?set=read'>設定為讀取模式</a>";
-  html += "<a class='btn' href='/mode?set=write'>設定為寫入模式</a><br>";
+  html += "<button class='btn' onclick=\"ajaxCall('/mode?set=read', 'mode')\">設定為讀取模式</button>";
+  html += "<button class='btn' onclick=\"ajaxCall('/mode?set=write', 'mode')\">設定為寫入模式</button><br>";
 
   html += "<h3>讀取卡片</h3>";
-  html += "<a class='btn btn-read' href='/read'>讀取卡片</a><br>";
+  html += "<button class='btn btn-read' onclick=\"ajaxCall('/read', 'read')\">讀取卡片</button><br>";
 
   html += "<h3>寫入卡片</h3>";
-  html += "<form action='/write' method='GET'>";
-  html += "<input type='text' name='data' placeholder='輸入要寫入的資料' maxlength='16'>";
-  html += "<input type='submit' class='btn btn-write' value='寫入卡片'>";
-  html += "</form>";
+  html += "<input type='text' id='writeData' placeholder='輸入要寫入的資料' maxlength='16'>";
+  html += "<button class='btn btn-write' onclick=\"writeCardData()\">寫入卡片</button><br>";
 
   html += "<h3>狀態查詢</h3>";
-  html += "<a class='btn' href='/status'>查詢狀態</a><br>";
+  html += "<button class='btn' onclick=\"ajaxCall('/status', 'status')\">查詢狀態</button><br>";
 
-  html += "<p><a href='/'>重新整理</a></p>";
-  html += "</div></body></html>";
+  html += "<div id='result'></div>";
+  html += "</div>";
+
+  // 添加JavaScript以支持AJAX功能
+  html += "<script>";
+  html += "function showLoading() {";
+  html += "  const resultDiv = document.getElementById('result');";
+  html += "  resultDiv.innerHTML = '<div style=\"color: orange;\">處理中，請稍候...</div>';";
+  html += "}";
+  html += "function ajaxCall(url, action) {";
+  html += "  showLoading();";  // 顯示加載狀態
+  html += "  fetch(url)";
+  html += "    .then(response => response.json())";
+  html += "    .then(data => {";
+  html += "      const resultDiv = document.getElementById('result');";
+  html += "      if(data.success) {";
+  html += "        if(action === 'mode') {";
+  html += "          resultDiv.innerHTML = '<div style=\"color: green;\">模式已設定為: ' + data.mode + '</div>';";
+  html += "        } else if(action === 'read') {";
+  html += "          resultDiv.innerHTML = '<div style=\"color: green;\">讀取成功 - UID: ' + data.uid + ', 資料: ' + data.data + '</div>';";
+  html += "        } else if(action === 'status') {";
+  html += "          resultDiv.innerHTML = '<div style=\"color: blue;\">狀態 - 模式: ' + data.mode + ', 最後UID: ' + data.last_uid + '</div>';";
+  html += "        } else {";
+  html += "          resultDiv.innerHTML = '<div style=\"color: green;\">操作成功</div>';";
+  html += "        }";
+  html += "      } else {";
+  html += "        resultDiv.innerHTML = '<div style=\"color: red;\">錯誤: ' + data.error + '</div>';";
+  html += "      }";
+  html += "    })";
+  html += "    .catch(error => {";
+  html += "      const resultDiv = document.getElementById('result');";
+  html += "      resultDiv.innerHTML = '<div style=\"color: red;\">網路錯誤: ' + error + '</div>';";
+  html += "    });";
+  html += "}";
+  html += "function writeCardData() {";
+  html += "  const dataInput = document.getElementById('writeData');";
+  html += "  const data = dataInput.value;";
+  html += "  if(data.trim() === '') {";
+  html += "    document.getElementById('result').innerHTML = '<div style=\"color: red;\">請輸入要寫入的資料</div>';";
+  html += "    return;";
+  html += "  }";
+  html += "  showLoading();";  // 顯示加載狀態
+  html += "  ajaxCall('/write?data=' + encodeURIComponent(data), 'write');";
+  html += "  dataInput.value = '';";
+  html += "}";
+  html += "</script>";
+  html += "</body></html>";
 
   server.send(200, "text/html", html);
 }
@@ -460,10 +503,50 @@ void handleRead() {
 
       String cardUID = uidToString();
 
-      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-      byte blockAddr = 4;
+      // 嘗試多種常見的默認密鑰
+      byte defaultKeys[][6] = {
+        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 默認密鑰
+        {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // Mifare默認密鑰
+        {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見密鑰
+        {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},  // 常見密鑰
+        {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD},  // 另一個常見密鑰
+        {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F}   // 另一個常見密鑰
+      };
 
-      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+      byte blockAddr = 4;  // 尝试读取扇区1的块4
+      bool authenticated = false;
+
+      // 首先尝试扇区1的块4
+      for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+        if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+          authenticated = true;
+          break;
+        }
+      }
+
+      // 如果扇区1失败，尝试扇区0的块4（数据块）
+      if (!authenticated) {
+        blockAddr = 0;  // 尝试读取扇区0的块0
+        for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+          if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+            authenticated = true;
+            break;
+          }
+        }
+      }
+
+      // 如果还是失败，尝试扇区0的密钥B块（块3）
+      if (!authenticated) {
+        blockAddr = 3;  // 尝试读取扇区0的密钥块
+        for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+          if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+            authenticated = true;
+            break;
+          }
+        }
+      }
+
+      if (authenticated) {
         byte data[16];
         if (readBlock(blockAddr, data) == 0) {
           String text = "";
@@ -475,12 +558,46 @@ void handleRead() {
           showOLED("Read OK!", cardUID, text);
           beep(100);
 
-          String response = "{ \"success\": true, \"uid\": \"" + cardUID + "\", \"data\": \"" + text + "\" }";
+          String response = "{";
+          response += " \"success\": true,";
+          response += " \"uid\": \"" + cardUID + "\",";
+          response += " \"data\": \"" + text + "\",";
+          response += " \"block\": " + String(blockAddr);
+          response += " }";
           server.send(200, "application/json", response);
         } else {
-          showOLED("Read FAIL", cardUID, "");
-          beepError();
-          server.send(200, "application/json", "{ \"success\": false, \"error\": \"Read failed\" }");
+          // 尝试读取其他块
+          bool readSuccess = false;
+          for (byte testBlock = 1; testBlock <= 15; testBlock++) {
+            if (testBlock % 4 != 3) { // 跳过密钥块
+              if (readBlock(testBlock, data) == 0) {
+                text = "";
+                for (int i = 0; i < 16; i++) {
+                  if (data[i] == 0) break;
+                  text += (char)data[i];
+                }
+
+                showOLED("Read OK!", cardUID, text);
+                beep(100);
+
+                String response = "{";
+                response += " \"success\": true,";
+                response += " \"uid\": \"" + cardUID + "\",";
+                response += " \"data\": \"" + text + "\",";
+                response += " \"block\": " + String(testBlock);
+                response += " }";
+                server.send(200, "application/json", response);
+                readSuccess = true;
+                break;
+              }
+            }
+          }
+
+          if (!readSuccess) {
+            showOLED("Read FAIL", cardUID, "");
+            beepError();
+            server.send(200, "application/json", "{ \"success\": false, \"error\": \"Read failed\" }");
+          }
         }
       } else {
         showOLED("Auth FAIL", cardUID, "");
@@ -512,10 +629,55 @@ void handleWrite() {
 
         String cardUID = uidToString();
 
-        byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-        byte blockAddr = 4;
+        // 嘗試多種常見的默認密鑰
+        byte defaultKeys[][6] = {
+          {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 默認密鑰
+          {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // Mifare默認密鑰
+          {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見密鑰
+          {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},  // 常見密鑰
+          {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD},  // 另一個常見密鑰
+          {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F}   // 另一個常見密鑰
+        };
 
-        if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+        byte blockAddr = 4;  // 默认写入扇区1的块4
+        bool authenticated = false;
+
+        // 首先尝试扇区1的块4
+        for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+          if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+            authenticated = true;
+            break;
+          }
+        }
+
+        // 如果扇区1失败，尝试扇区0的数据块
+        if (!authenticated) {
+          blockAddr = 4;  // 尝试写入扇区1的另一个数据块
+          for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+            if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+              authenticated = true;
+              break;
+            }
+          }
+        }
+
+        // 如果还是失败，尝试其他数据块
+        if (!authenticated) {
+          for (byte testBlock = 1; testBlock <= 15; testBlock++) {
+            if (testBlock % 4 != 3) { // 跳过密钥块
+              for (int keyIndex = 0; keyIndex < 6; keyIndex++) {
+                if (authenticate(PICC_AUTHENT1A, testBlock, defaultKeys[keyIndex], uid) == 0) {
+                  authenticated = true;
+                  blockAddr = testBlock;
+                  break;
+                }
+              }
+              if (authenticated) break;
+            }
+          }
+        }
+
+        if (authenticated) {
           byte data[16] = {0};
           for (int i = 0; i < dataToWrite.length() && i < 16; i++) {
             data[i] = dataToWrite[i];
@@ -525,7 +687,12 @@ void handleWrite() {
             showOLED("Write OK!", cardUID, dataToWrite);
             beepSuccess();
 
-            String response = "{ \"success\": true, \"uid\": \"" + cardUID + "\", \"data\": \"" + dataToWrite + "\" }";
+            String response = "{";
+            response += " \"success\": true,";
+            response += " \"uid\": \"" + cardUID + "\",";
+            response += " \"data\": \"" + dataToWrite + "\",";
+            response += " \"block\": " + String(blockAddr);
+            response += " }";
             server.send(200, "application/json", response);
           } else {
             showOLED("Write FAIL", cardUID, "");
@@ -570,11 +737,11 @@ void handleMode() {
 
 void handleStatus() {
   String status = "{";
-  status += "\"ssid\":\"" + String(ssid) + "\",";
-  status += "\"ip\":\"" + WiFi.softAPIP().toString() + "\",";
-  status += "\"mode\":\"" + String(writeMode ? "write" : "read") + "\",";
-  status += "\"last_uid\":\"" + lastUID + "\"";
-  status += "}";
+  status += " \"ssid\": \"" + String(ssid) + "\",";
+  status += " \"ip\": \"" + WiFi.softAPIP().toString() + "\",";
+  status += " \"mode\": \"" + String(writeMode ? "write" : "read") + "\",";
+  status += " \"last_uid\": \"" + lastUID + "\"";
+  status += " }";
   server.send(200, "application/json", status);
 }
 
@@ -733,16 +900,32 @@ void loop() {
     if (writeMode) {
       showOLED("Writing...", lastUID, "");
 
-      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-      byte blockAddr = 4;
+      // 嘗試多種常見的默認密鑰
+      byte defaultKeys[][6] = {
+        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 默認密鑰
+        {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // Mifare默認密鑰
+        {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見密鑰
+        {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5}   // 常見密鑰
+      };
 
-      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
+      byte blockAddr = 4;
+      bool authenticated = false;
+
+      // 嘗試不同的密鑰進行驗證
+      for (int keyIndex = 0; keyIndex < 4; keyIndex++) {
+        if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+          authenticated = true;
+          break;
+        }
+      }
+
+      if (!authenticated) {
         showOLED("Auth FAIL", lastUID, "");
         beepError();
         Serial.println("Auth failed");
       } else {
         byte data[16] = {0};
-        String text = "HELLO_AVEI";
+        String text = "00150";
         for (int i = 0; i < text.length() && i < 16; i++) {
           data[i] = text[i];
         }
@@ -760,10 +943,26 @@ void loop() {
     } else {
       showOLED("Reading...", lastUID, "");
 
-      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-      byte blockAddr = 4;
+      // 嘗試多種常見的默認密鑰
+      byte defaultKeys[][6] = {
+        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 默認密鑰
+        {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // Mifare默認密鑰
+        {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見密鑰
+        {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5}   // 常見密鑰
+      };
 
-      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
+      byte blockAddr = 4;
+      bool authenticated = false;
+
+      // 嘗試不同的密鑰進行驗證
+      for (int keyIndex = 0; keyIndex < 4; keyIndex++) {
+        if (authenticate(PICC_AUTHENT1A, blockAddr, defaultKeys[keyIndex], uid) == 0) {
+          authenticated = true;
+          break;
+        }
+      }
+
+      if (!authenticated) {
         showOLED("Auth FAIL", lastUID, "");
         beepError();
         Serial.println("Auth failed");
