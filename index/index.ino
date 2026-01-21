@@ -4,7 +4,7 @@
 
 // ===== WiFi 設定 =====
 const char* ssid = "RFID-Punch-System";  // AP 名稱
-const char* password = "12345689";       // AP 密碼 (至少8位)
+const char* password = "123456789";       // AP 密碼 (至少8位)
 
 // ===== Web 服務器 =====
 ESP8266WebServer server(80);
