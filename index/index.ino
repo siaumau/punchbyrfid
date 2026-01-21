@@ -468,6 +468,6 @@ void loop() {
   }
   
   halt();
-  delay(2000);
+  delay(5000);
   showOLED(writeMode ? "WRITE MODE" : "READ MODE", "Tap card", "");
 }
