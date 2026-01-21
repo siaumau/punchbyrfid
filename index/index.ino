@@ -4,7 +4,7 @@
 
 // ===== WiFi 設定 =====
 const char* ssid = "RFID-Punch-System";  // AP 名稱
-const char* password = "12345678";       // AP 密碼 (至少8位)
+const char* password = "12345689";       // AP 密碼 (至少8位)
 
 // ===== Web 服務器 =====
 ESP8266WebServer server(80);
@@ -410,9 +410,9 @@ void setup() {
 // ===== 網頁服務器處理函數 =====
 void handleRoot() {
   String html = "<!DOCTYPE html><html>";
-  html += "<head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<title>RFID 打卡系統</title>";
-  html += "<style>body { font-family: Arial; text-align: center; }";
+  html += "<style>body { font-family: Arial, sans-serif; text-align: center; }";
   html += ".container { max-width: 600px; margin: 0 auto; padding: 20px; }";
   html += ".btn { display: inline-block; padding: 10px 20px; margin: 10px; ";
   html += "background-color: #4CAF50; color: white; text-decoration: none; ";
