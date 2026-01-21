@@ -1,8 +1,17 @@
 #include <U8g2lib.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+// ===== WiFi 設定 =====
+const char* ssid = "RFID-Punch-System";  // AP 名稱
+const char* password = "12345678";       // AP 密碼 (至少8位)
+
+// ===== Web 服務器 =====
+ESP8266WebServer server(80);
 
 // ===== HW-364A OLED (硬體焊接，不能改) =====
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, 
-    /* reset=*/ U8X8_PIN_NONE, 
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0,
+    /* reset=*/ U8X8_PIN_NONE,
     /* clock=*/ 12,  // GPIO12 = D6
     /* data=*/  14); // GPIO14 = D5
 
@@ -341,44 +350,354 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== HW-364A + RC522 (Full) ===");
-  
+
   u8g2.begin();
   showOLED("HW-364A", "RFID System", "Init...");
-  
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
-  
+
   Serial.println("Init Soft SPI...");
   spiBegin();
   delay(100);
-  
+
   Serial.println("Reset RFID...");
   digitalWrite(RST_PIN, LOW);
   delay(50);
   digitalWrite(RST_PIN, HIGH);
   delay(50);
-  
+
   reset();
   delay(100);
-  
+
   byte version = readRegister(VersionReg);
   Serial.print("MFRC522 Version: 0x");
   Serial.println(version, HEX);
-  
+
   if (version == 0x00 || version == 0xFF) {
     showOLED("ERROR!", "RFID fail", "");
     beepError();
     while(1);
   }
-  
+
+  // 設定WiFi AP模式
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP 地址: ");
+  Serial.println(IP);
+
+  // 設定網頁服務器路由
+  server.on("/", handleRoot);
+  server.on("/read", handleRead);
+  server.on("/write", handleWrite);
+  server.on("/mode", handleMode);
+  server.on("/status", handleStatus);
+
+  server.begin();
+  Serial.println("Web 服務器開始運行");
+  Serial.print("連接到 WiFi AP: ");
+  Serial.print(ssid);
+  Serial.print(" 密碼: ");
+  Serial.println(password);
+  Serial.print("在網頁瀏覽器輸入: http://");
+  Serial.println(IP);
+
   beepSuccess();
-  showOLED("Ready!", "Tap card", "READ MODE");
-  Serial.println("Ready!");
+  showOLED("Ready!", "WiFi AP ON", "Connect to RFID");
+}
+
+// ===== 網頁服務器處理函數 =====
+void handleRoot() {
+  String html = "<!DOCTYPE html><html>";
+  html += "<head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>RFID 打卡系統</title>";
+  html += "<style>body { font-family: Arial; text-align: center; }";
+  html += ".container { max-width: 600px; margin: 0 auto; padding: 20px; }";
+  html += ".btn { display: inline-block; padding: 10px 20px; margin: 10px; ";
+  html += "background-color: #4CAF50; color: white; text-decoration: none; ";
+  html += "border-radius: 4px; border: none; cursor: pointer; font-size: 16px; }";
+  html += ".btn-read { background-color: #2196F3; }";
+  html += ".btn-write { background-color: #FF9800; }";
+  html += "input[type='text'] { width: 80%; padding: 10px; margin: 10px; font-size: 16px; }";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<h1>RFID 打卡系統</h1>";
+  html += "<p>IP: " + WiFi.softAPIP().toString() + "</p>";
+
+  html += "<h3>模式設定</h3>";
+  html += "<a class='btn' href='/mode?set=read'>設定為讀取模式</a>";
+  html += "<a class='btn' href='/mode?set=write'>設定為寫入模式</a><br>";
+
+  html += "<h3>讀取卡片</h3>";
+  html += "<a class='btn btn-read' href='/read'>讀取卡片</a><br>";
+
+  html += "<h3>寫入卡片</h3>";
+  html += "<form action='/write' method='GET'>";
+  html += "<input type='text' name='data' placeholder='輸入要寫入的資料' maxlength='16'>";
+  html += "<input type='submit' class='btn btn-write' value='寫入卡片'>";
+  html += "</form>";
+
+  html += "<h3>狀態查詢</h3>";
+  html += "<a class='btn' href='/status'>查詢狀態</a><br>";
+
+  html += "<p><a href='/'>重新整理</a></p>";
+  html += "</div></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleRead() {
+  // 執行讀取操作
+  byte tagType[2];
+  if (request(PICC_REQIDL, tagType) == 0) {
+    byte serNum[5];
+    if (antiCollision(serNum) == 0) {
+      for (byte i = 0; i < 4; i++) {
+        uid[i] = serNum[i];
+      }
+      uidSize = 4;
+
+      String cardUID = uidToString();
+
+      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+      byte blockAddr = 4;
+
+      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+        byte data[16];
+        if (readBlock(blockAddr, data) == 0) {
+          String text = "";
+          for (int i = 0; i < 16; i++) {
+            if (data[i] == 0) break;
+            text += (char)data[i];
+          }
+
+          showOLED("Read OK!", cardUID, text);
+          beep(100);
+
+          String response = "{ \"success\": true, \"uid\": \"" + cardUID + "\", \"data\": \"" + text + "\" }";
+          server.send(200, "application/json", response);
+        } else {
+          showOLED("Read FAIL", cardUID, "");
+          beepError();
+          server.send(200, "application/json", "{ \"success\": false, \"error\": \"Read failed\" }");
+        }
+      } else {
+        showOLED("Auth FAIL", cardUID, "");
+        beepError();
+        server.send(200, "application/json", "{ \"success\": false, \"error\": \"Authentication failed\" }");
+      }
+      halt();
+    } else {
+      server.send(200, "application/json", "{ \"success\": false, \"error\": \"No card detected\" }");
+    }
+  } else {
+    server.send(200, "application/json", "{ \"success\": false, \"error\": \"No card detected\" }");
+  }
+}
+
+void handleWrite() {
+  if(server.hasArg("data")) {
+    String dataToWrite = server.arg("data");
+
+    // 執行寫入操作
+    byte tagType[2];
+    if (request(PICC_REQIDL, tagType) == 0) {
+      byte serNum[5];
+      if (antiCollision(serNum) == 0) {
+        for (byte i = 0; i < 4; i++) {
+          uid[i] = serNum[i];
+        }
+        uidSize = 4;
+
+        String cardUID = uidToString();
+
+        byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        byte blockAddr = 4;
+
+        if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+          byte data[16] = {0};
+          for (int i = 0; i < dataToWrite.length() && i < 16; i++) {
+            data[i] = dataToWrite[i];
+          }
+
+          if (writeBlock(blockAddr, data) == 0) {
+            showOLED("Write OK!", cardUID, dataToWrite);
+            beepSuccess();
+
+            String response = "{ \"success\": true, \"uid\": \"" + cardUID + "\", \"data\": \"" + dataToWrite + "\" }";
+            server.send(200, "application/json", response);
+          } else {
+            showOLED("Write FAIL", cardUID, "");
+            beepError();
+            server.send(200, "application/json", "{ \"success\": false, \"error\": \"Write failed\" }");
+          }
+        } else {
+          showOLED("Auth FAIL", cardUID, "");
+          beepError();
+          server.send(200, "application/json", "{ \"success\": false, \"error\": \"Authentication failed\" }");
+        }
+        halt();
+      } else {
+        server.send(200, "application/json", "{ \"success\": false, \"error\": \"No card detected\" }");
+      }
+    } else {
+      server.send(200, "application/json", "{ \"success\": false, \"error\": \"No card detected\" }");
+    }
+  } else {
+    server.send(200, "application/json", "{ \"success\": false, \"error\": \"No data provided\" }");
+  }
+}
+
+void handleMode() {
+  if(server.hasArg("set")) {
+    String mode = server.arg("set");
+    if(mode == "read") {
+      writeMode = false;
+      showOLED("READ MODE", "Tap card", "");
+      server.send(200, "application/json", "{ \"success\": true, \"mode\": \"read\" }");
+    } else if(mode == "write") {
+      writeMode = true;
+      showOLED("WRITE MODE", "Tap card", "");
+      server.send(200, "application/json", "{ \"success\": true, \"mode\": \"write\" }");
+    } else {
+      server.send(200, "application/json", "{ \"success\": false, \"error\": \"Invalid mode\" }");
+    }
+  } else {
+    server.send(200, "application/json", "{ \"success\": false, \"error\": \"No mode specified\" }");
+  }
+}
+
+void handleStatus() {
+  String status = "{";
+  status += "\"ssid\":\"" + String(ssid) + "\",";
+  status += "\"ip\":\"" + WiFi.softAPIP().toString() + "\",";
+  status += "\"mode\":\"" + String(writeMode ? "write" : "read") + "\",";
+  status += "\"last_uid\":\"" + lastUID + "\"";
+  status += "}";
+  server.send(200, "application/json", status);
 }
 
 // ===== LOOP =====
 void loop() {
+  // 處理網頁請求
+  server.handleClient();
+
+  // 處理串口命令
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    if (command.startsWith("WRITE:")) {
+      // 解析寫入命令，例如: WRITE:00100
+      String dataToWrite = command.substring(6); // 移除 "WRITE:" 前綴
+
+      // 查找卡片並寫入
+      byte tagType[2];
+      if (request(PICC_REQIDL, tagType) == 0) {
+        byte serNum[5];
+        if (antiCollision(serNum) == 0) {
+          for (byte i = 0; i < 4; i++) {
+            uid[i] = serNum[i];
+          }
+          uidSize = 4;
+
+          String cardUID = uidToString();
+          Serial.println("Card UID: " + cardUID);
+
+          // 執行寫入操作
+          byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+          byte blockAddr = 4;
+
+          if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+            byte data[16] = {0};
+            for (int i = 0; i < dataToWrite.length() && i < 16; i++) {
+              data[i] = dataToWrite[i];
+            }
+
+            if (writeBlock(blockAddr, data) == 0) {
+              showOLED("Write OK!", cardUID, dataToWrite);
+              beepSuccess();
+              Serial.println("Write Success: " + dataToWrite);
+            } else {
+              showOLED("Write FAIL", cardUID, "");
+              beepError();
+              Serial.println("Write Failed");
+            }
+          } else {
+            showOLED("Auth FAIL", cardUID, "");
+            beepError();
+            Serial.println("Authentication Failed");
+          }
+          halt();
+        } else {
+          Serial.println("No card detected for write operation");
+        }
+      } else {
+        Serial.println("No card detected for write operation");
+      }
+    }
+    else if (command == "READ") {
+      // 執行讀取命令
+      byte tagType[2];
+      if (request(PICC_REQIDL, tagType) == 0) {
+        byte serNum[5];
+        if (antiCollision(serNum) == 0) {
+          for (byte i = 0; i < 4; i++) {
+            uid[i] = serNum[i];
+          }
+          uidSize = 4;
+
+          String cardUID = uidToString();
+          Serial.println("Card UID: " + cardUID);
+
+          byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+          byte blockAddr = 4;
+
+          if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) == 0) {
+            byte data[16];
+
+            if (readBlock(blockAddr, data) == 0) {
+              String text = "";
+              for (int i = 0; i < 16; i++) {
+                if (data[i] == 0) break;
+                text += (char)data[i];
+              }
+
+              showOLED("Read OK!", cardUID, text);
+              beep(100);
+              Serial.println("Data: " + text);
+            } else {
+              showOLED("Read FAIL", cardUID, "");
+              beepError();
+              Serial.println("Read failed");
+            }
+          } else {
+            showOLED("Auth FAIL", cardUID, "");
+            beepError();
+            Serial.println("Authentication Failed");
+          }
+          halt();
+        } else {
+          Serial.println("No card detected for read operation");
+        }
+      } else {
+        Serial.println("No card detected for read operation");
+      }
+    }
+    else if (command == "MODE:READ") {
+      writeMode = false;
+      showOLED("READ MODE", "Tap card", "");
+      Serial.println("Switched to READ mode");
+    }
+    else if (command == "MODE:WRITE") {
+      writeMode = true;
+      showOLED("WRITE MODE", "Tap card", "");
+      Serial.println("Switched to WRITE mode");
+    }
+  }
+
+  // 按鈕控制仍然有效
   if (digitalRead(BUTTON_PIN) == LOW) {
     writeMode = !writeMode;
     beep(50);
@@ -387,87 +706,90 @@ void loop() {
     delay(300);
     while (digitalRead(BUTTON_PIN) == LOW);
   }
-  
-  byte tagType[2];
-  if (request(PICC_REQIDL, tagType) != 0) {
-    delay(50);
-    return;
-  }
-  
-  byte serNum[5];
-  if (antiCollision(serNum) != 0) {
-    delay(50);
-    return;
-  }
-  
-  for (byte i = 0; i < 4; i++) {
-    uid[i] = serNum[i];
-  }
-  uidSize = 4;
-  
-  lastUID = uidToString();
-  Serial.println("Card UID: " + lastUID);
-  beep(50);
-  
-  if (writeMode) {
-    showOLED("Writing...", lastUID, "");
-    
-    byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    byte blockAddr = 4;
-    
-    if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
-      showOLED("Auth FAIL", lastUID, "");
-      beepError();
-      Serial.println("Auth failed");
-    } else {
-      byte data[16] = {0};
-      String text = "HELLO_AVEI";
-      for (int i = 0; i < text.length() && i < 16; i++) {
-        data[i] = text[i];
-      }
-      
-      if (writeBlock(blockAddr, data) == 0) {
-        showOLED("Write OK!", lastUID, text);
-        beepSuccess();
-        Serial.println("Wrote: " + text);
-      } else {
-        showOLED("Write FAIL", lastUID, "");
-        beepError();
-        Serial.println("Write failed");
-      }
+
+  // 如果不是通過串口命令操作，則執行正常的讀卡流程
+  if (!Serial.available()) {  // 當沒有串口命令時
+    byte tagType[2];
+    if (request(PICC_REQIDL, tagType) != 0) {
+      delay(50);
+      return;
     }
-  } else {
-    showOLED("Reading...", lastUID, "");
-    
-    byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    byte blockAddr = 4;
-    
-    if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
-      showOLED("Auth FAIL", lastUID, "");
-      beepError();
-      Serial.println("Auth failed");
-    } else {
-      byte data[16];
-      
-      if (readBlock(blockAddr, data) == 0) {
-        String text = "";
-        for (int i = 0; i < 16; i++) {
-          if (data[i] == 0) break;
-          text += (char)data[i];
+
+    byte serNum[5];
+    if (antiCollision(serNum) != 0) {
+      delay(50);
+      return;
+    }
+
+    for (byte i = 0; i < 4; i++) {
+      uid[i] = serNum[i];
+    }
+    uidSize = 4;
+
+    lastUID = uidToString();
+    Serial.println("Card UID: " + lastUID);
+    beep(50);
+
+    if (writeMode) {
+      showOLED("Writing...", lastUID, "");
+
+      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+      byte blockAddr = 4;
+
+      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
+        showOLED("Auth FAIL", lastUID, "");
+        beepError();
+        Serial.println("Auth failed");
+      } else {
+        byte data[16] = {0};
+        String text = "HELLO_AVEI";
+        for (int i = 0; i < text.length() && i < 16; i++) {
+          data[i] = text[i];
         }
-        
-        showOLED("Read OK!", lastUID, text);
-        beep(100);
-        Serial.println("Data: " + text);
-      } else {
-        showOLED("Read FAIL", lastUID, "");
+
+        if (writeBlock(blockAddr, data) == 0) {
+          showOLED("Write OK!", lastUID, text);
+          beepSuccess();
+          Serial.println("Wrote: " + text);
+        } else {
+          showOLED("Write FAIL", lastUID, "");
+          beepError();
+          Serial.println("Write failed");
+        }
+      }
+    } else {
+      showOLED("Reading...", lastUID, "");
+
+      byte key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+      byte blockAddr = 4;
+
+      if (authenticate(PICC_AUTHENT1A, blockAddr, key, uid) != 0) {
+        showOLED("Auth FAIL", lastUID, "");
         beepError();
-        Serial.println("Read failed");
+        Serial.println("Auth failed");
+      } else {
+        byte data[16];
+
+        if (readBlock(blockAddr, data) == 0) {
+          String text = "";
+          for (int i = 0; i < 16; i++) {
+            if (data[i] == 0) break;
+            text += (char)data[i];
+          }
+
+          showOLED("Read OK!", lastUID, text);
+          beep(100);
+          Serial.println("Data: " + text);
+        } else {
+          showOLED("Read FAIL", lastUID, "");
+          beepError();
+          Serial.println("Read failed");
+        }
       }
     }
+
+    halt();
+    delay(5000);
+    showOLED(writeMode ? "WRITE MODE" : "READ MODE", "Tap card", "");
   }
-  
-  halt();
-  delay(5000);
-  showOLED(writeMode ? "WRITE MODE" : "READ MODE", "Tap card", "");
 }
