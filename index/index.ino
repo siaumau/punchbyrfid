@@ -229,7 +229,7 @@ void handleRead() {
   isProcessing = true;
 
   // 短暫延遲以確保其他處理完成
-  delay(100);
+  delay(50);
 
   String res = "{\"success\":false,\"error\":\"No Card detected\"}";
   byte type[2], sn[5], data[16];
@@ -251,55 +251,41 @@ void handleRead() {
     // 只返回UID而不嘗試讀取數據，如果認證失敗
     String uidStr = uidToString();
 
-    // 嘗試使用不同扇區和金鑰進行認證
+    // 優化：只嘗試一個扇區和第一把金鑰來快速獲取數據
     bool auth_ok = false;
-    for(int sector = 0; sector < 16; sector++) {  // 嘗試前16個扇區
-      if(sector % 4 == 3) continue; // 跳過扇區尾部的控制塊
 
-      for(int k=0; k<4; k++) {
-        if (authenticate(PICC_AUTHENT1A, sector * 4, keys[k], uid) == 0) {
-          auth_ok = true;
+    // 優先嘗試最常見的默認金鑰在扇區0
+    if (authenticate(PICC_AUTHENT1A, 4, keys[0], uid) == 0) { // 使用扇區1的塊0（即塊4）
+      auth_ok = true;
 
-          // 成功認證後，嘗試讀取數據
-          if (readBlock(sector * 4, data) == 0) {
-            String msg = "";
-            for(int i=0; i<16 && data[i]!=0; i++) {
-              if(data[i] >= 32 && data[i] <= 126) { // 只添加可打印字符
-                msg += (char)data[i];
-              } else {
-                msg += "[" + String(data[i], HEX) + "]"; // 不可打印字符顯示為十六進制
-              }
-            }
-            res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\""+msg+"\"}";
-            beep(100);
+      // 成功認證後，嘗試讀取數據
+      if (readBlock(4, data) == 0) {
+        String msg = "";
+        for(int i=0; i<16 && data[i]!=0; i++) {
+          if(data[i] >= 32 && data[i] <= 126) { // 只添加可打印字符
+            msg += (char)data[i];
           } else {
-            // 即使讀取數據失敗，也返回UID
-            res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Read data failed, UID only\"}";
-            beep(100);
+            msg += "[" + String(data[i], HEX) + "]"; // 不可打印字符顯示為十六進制
           }
-          break;
         }
-
-        // 認證失敗後重新初始化RFID模組並重新檢測卡片
-        reset();
-        if(request(PICC_REQIDL, type) != 0 || antiCollision(sn) != 0) {
-          // 如果重新檢測失敗，跳出
-          break;
-        }
-        for(int i=0; i<4; i++) uid[i]=sn[i];
+        res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\""+msg+"\"}";
+        beep(100);
+      } else {
+        // 即使讀取數據失敗，也返回UID
+        res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Read data failed, UID only\"}";
+        beep(100);
       }
-
-      if(auth_ok) break; // 如果已成功認證任何扇區，則退出
     }
 
     if (!auth_ok) {
-      // 如果所有扇區都無法認證，至少返回UID
-      res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Card detected but all sectors locked\",\"info\":\"Card may be protected or not MIFARE Classic\"}";
+      // 如果默認金鑰認證失敗，至少返回UID
+      res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Card detected but default key failed\",\"info\":\"Card may be protected or not MIFARE Classic\"}";
       beep(100); // 即使無法讀取數據也發出提示音
     }
 
     halt();
   }
+
   server.send(200, "application/json", res);
   isProcessing = false;
 }
@@ -308,7 +294,7 @@ void handleWrite() {
   isProcessing = true;
 
   // 短暫延遲以確保其他處理完成
-  delay(100);
+  delay(50);
 
   String res = "{\"success\":false,\"error\":\"No Card detected\"}";
   String toWrite = server.arg("data");
@@ -329,37 +315,20 @@ void handleWrite() {
     for(int i=0;i<4;i++) uid[i]=sn[i];
 
     bool write_ok = false;
-    // 嘗試不同扇區和金鑰進行寫入
-    for(int sector = 0; sector < 16; sector++) {  // 嘗試前16個扇區
-      if(sector % 4 == 3) continue; // 跳過扇區尾部的控制塊
+    // 優化：優先嘗試默認金鑰在特定扇區進行寫入
+    if (authenticate(PICC_AUTHENT1A, 4, keys[0], uid) == 0) { // 使用扇區1的塊0（即塊4）
+      // 準備要寫入的數據
+      for(int i=0; i<toWrite.length() && i<16; i++) data[i] = toWrite[i];
 
-      for(int k=0; k<4; k++) {
-        if (authenticate(PICC_AUTHENT1A, sector * 4, keys[k], uid) == 0) {
-          // 準備要寫入的數據
-          for(int i=0; i<toWrite.length() && i<16; i++) data[i] = toWrite[i];
-
-          if (writeBlock(sector * 4, data) == 0) {
-            res = "{\"success\":true,\"uid\":\""+uidToString()+"\",\"data\":\""+toWrite+"\",\"sector\":"+String(sector * 4)+"}";
-            beep(100); delay(50); beep(100);
-            write_ok = true;
-            break;
-          }
-        }
-
-        // 寫入失敗後重新初始化RFID模組並重新檢測卡片
-        reset();
-        if(request(PICC_REQIDL, type) != 0 || antiCollision(sn) != 0) {
-          // 如果重新檢測失敗，跳出
-          break;
-        }
-        for(int i=0; i<4; i++) uid[i]=sn[i];
+      if (writeBlock(4, data) == 0) {
+        res = "{\"success\":true,\"uid\":\""+uidToString()+"\",\"data\":\""+toWrite+"\",\"sector\":4}";
+        beep(100); delay(50); beep(100);
+        write_ok = true;
       }
-
-      if(write_ok) break; // 如果已成功寫入任何扇區，則退出
     }
 
     if(!write_ok) {
-      res = "{\"success\":false,\"error\":\"Auth failed for all keys and sectors\",\"uid\":\""+uidToString()+"\"}";
+      res = "{\"success\":false,\"error\":\"Auth failed for default key\",\"uid\":\""+uidToString()+"\"}";
     }
     halt();
   }
