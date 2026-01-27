@@ -234,12 +234,14 @@ void handleRead() {
   String res = "{\"success\":false,\"error\":\"No Card detected\"}";
   byte type[2], sn[5], data[16];
 
-  // 定義多組金鑰
+  // 定義多組常見默認金鑰
   byte keys[][6] = {
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},
-    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 最常見的默認金鑰
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // 全零金鑰
+    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // 常見默認金鑰
+    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見默認金鑰
+    {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},  // 其他常見金鑰
+    {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD}   // 其他常見金鑰
   };
 
   // 重新初始化RFID模組
@@ -251,35 +253,52 @@ void handleRead() {
     // 只返回UID而不嘗試讀取數據，如果認證失敗
     String uidStr = uidToString();
 
-    // 優化：只嘗試一個扇區和第一把金鑰來快速獲取數據
+    // 優化：嘗試多個可能的塊，包括扇區1的塊5
     bool auth_ok = false;
+    byte blocks_to_try[] = {4, 5, 0, 8, 1, 2, 3}; // 優先嘗試範例中使用的塊5
+    int num_blocks = sizeof(blocks_to_try)/sizeof(blocks_to_try[0]);
+    int num_keys = sizeof(keys)/sizeof(keys[0]); // 更新金鑰數量計算
 
-    // 優先嘗試最常見的默認金鑰在扇區0
-    if (authenticate(PICC_AUTHENT1A, 4, keys[0], uid) == 0) { // 使用扇區1的塊0（即塊4）
-      auth_ok = true;
+    for(int b = 0; b < num_blocks && !auth_ok; b++) {
+      byte block = blocks_to_try[b];
 
-      // 成功認證後，嘗試讀取數據
-      if (readBlock(4, data) == 0) {
-        String msg = "";
-        for(int i=0; i<16 && data[i]!=0; i++) {
-          if(data[i] >= 32 && data[i] <= 126) { // 只添加可打印字符
-            msg += (char)data[i];
-          } else {
-            msg += "[" + String(data[i], HEX) + "]"; // 不可打印字符顯示為十六進制
+      // 避免嘗試控制塊（每個扇區的最後一塊）
+      if((block + 1) % 4 == 0) continue;
+
+      reset(); // 每次嘗試前重新初始化
+      if(request(PICC_REQIDL, type) == 0 && antiCollision(sn) == 0) {
+        for(int i=0; i<4; i++) uid[i]=sn[i]; // 重新獲取UID
+
+        for(int k=0; k<num_keys && !auth_ok; k++) { // 使用動態金鑰數量
+          if (authenticate(PICC_AUTHENT1A, block, keys[k], uid) == 0) {
+            auth_ok = true;
+
+            // 成功認證後，嘗試讀取數據
+            if (readBlock(block, data) == 0) {
+              String msg = "";
+              for(int i=0; i<16 && data[i]!=0; i++) {
+                if(data[i] >= 32 && data[i] <= 126) { // 只添加可打印字符
+                  msg += (char)data[i];
+                } else {
+                  msg += "[" + String(data[i], HEX) + "]"; // 不可打印字符顯示為十六進制
+                }
+              }
+              res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\""+msg+"\"}";
+              beep(100);
+            } else {
+              // 即使讀取數據失敗，也返回UID
+              res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Read data failed, UID only\"}";
+              beep(100);
+            }
+            break; // 成功後立即退出循環
           }
         }
-        res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\""+msg+"\"}";
-        beep(100);
-      } else {
-        // 即使讀取數據失敗，也返回UID
-        res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Read data failed, UID only\"}";
-        beep(100);
       }
     }
 
     if (!auth_ok) {
-      // 如果默認金鑰認證失敗，至少返回UID
-      res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Card detected but default key failed\",\"info\":\"Card may be protected or not MIFARE Classic\"}";
+      // 如果所有金鑰和扇區都無法認證，至少返回UID
+      res = "{\"success\":true,\"uid\":\""+uidStr+"\",\"data\":\"Card detected but all keys failed\",\"info\":\"Card may be protected or not MIFARE Classic\"}";
       beep(100); // 即使無法讀取數據也發出提示音
     }
 
@@ -300,12 +319,14 @@ void handleWrite() {
   String toWrite = server.arg("data");
   byte type[2], sn[5], data[16]={0};
 
-  // 定義多組金鑰
+  // 定義多組常見默認金鑰
   byte keys[][6] = {
-    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},
-    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // 最常見的默認金鑰
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // 全零金鑰
+    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},  // 常見默認金鑰
+    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5},  // 常見默認金鑰
+    {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5},  // 其他常見金鑰
+    {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD}   // 其他常見金鑰
   };
 
   // 重新初始化RFID模組
@@ -315,20 +336,42 @@ void handleWrite() {
     for(int i=0;i<4;i++) uid[i]=sn[i];
 
     bool write_ok = false;
-    // 優化：優先嘗試默認金鑰在特定扇區進行寫入
-    if (authenticate(PICC_AUTHENT1A, 4, keys[0], uid) == 0) { // 使用扇區1的塊0（即塊4）
-      // 準備要寫入的數據
-      for(int i=0; i<toWrite.length() && i<16; i++) data[i] = toWrite[i];
+    // 根據範例代碼，嘗試多個可能的塊，包括扇區1的塊5
+    byte blocks_to_try[] = {4, 5, 0, 8, 1, 2, 3}; // 優先嘗試範例中使用的塊5
+    int num_blocks = sizeof(blocks_to_try)/sizeof(blocks_to_try[0]);
+    int num_keys = sizeof(keys)/sizeof(keys[0]); // 更新金鑰數量計算
 
-      if (writeBlock(4, data) == 0) {
-        res = "{\"success\":true,\"uid\":\""+uidToString()+"\",\"data\":\""+toWrite+"\",\"sector\":4}";
-        beep(100); delay(50); beep(100);
-        write_ok = true;
+    for(int b = 0; b < num_blocks && !write_ok; b++) {
+      byte block = blocks_to_try[b];
+
+      // 避免嘗試控制塊（每個扇區的最後一塊）
+      if((block + 1) % 4 == 0) continue;
+
+      reset(); // 每次嘗試前重新初始化
+      if(request(PICC_REQIDL, type) == 0 && antiCollision(sn) == 0) {
+        for(int i=0; i<4; i++) uid[i]=sn[i]; // 重新獲取UID
+
+        for(int k=0; k<num_keys && !write_ok; k++) { // 使用動態金鑰數量
+          if (authenticate(PICC_AUTHENT1A, block, keys[k], uid) == 0) {
+            // 準備要寫入的數據
+            for(int i=0; i<toWrite.length() && i<16; i++) data[i] = toWrite[i];
+
+            // 填充剩餘空間為0
+            for(int i=toWrite.length(); i<16; i++) data[i] = 0;
+
+            if (writeBlock(block, data) == 0) {
+              res = "{\"success\":true,\"uid\":\""+uidToString()+"\",\"data\":\""+toWrite+"\",\"sector\":"+String(block)+"}";
+              beep(100); delay(50); beep(100);
+              write_ok = true;
+              break;
+            }
+          }
+        }
       }
     }
 
     if(!write_ok) {
-      res = "{\"success\":false,\"error\":\"Auth failed for default key\",\"uid\":\""+uidToString()+"\"}";
+      res = "{\"success\":false,\"error\":\"Auth failed for all keys and blocks\",\"uid\":\""+uidToString()+"\"}";
     }
     halt();
   }
